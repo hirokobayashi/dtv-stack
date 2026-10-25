@@ -1,0 +1,103 @@
+# dtv-stack — build recipes for EDCB / TVTest / px4_drv (WinUSB), x64-only.
+# Derived from tsukumijima/DTV-Builds (https://github.com/tsukumijima/DTV-Builds).
+
+# =============================================================================
+# Runtime secrets — NEVER commit, even to the private config repo (plaintext).
+# These are created at runtime on the Windows machine by the apps themselves.
+# SCOPE NOTE: the EpgTimerSrv.ini / EpgTimer.ini / Common.ini entries below are
+# denied repo-wide ON PURPOSE so a deployed config can never be masked by an
+# ignore rule. Generic templates must be committed under a different name,
+# e.g. assets/EDCB/EpgTimerSrv.ini.template.
+# =============================================================================
+glpasswd
+ssl_cert.pem
+ssl_peer.pem
+ssl_cert.key
+ssl_cert.csr
+server.key
+server.crt
+*.pem
+*.p12
+*.pfx
+*.key
+!*.pub
+jkcnsl.json
+jkcnsl.json.*
+EpgTimerSrv.ini
+EpgTimer.ini
+Common.ini
+HttpPublic.ini.local
+
+# --- optional: encrypted variants ARE allowed (SOPS/age) ---
+!*.sops.yaml
+!*.sops.json
+!*.age
+!*.age.asc
+
+# =============================================================================
+# EDCB Material WebUI / Lua caches (generated at runtime)
+# =============================================================================
+HttpPublic/api/*_cache
+*.luac
+
+# =============================================================================
+# Emacs generated files
+# =============================================================================
+*~
+# Byte-compiled / cached elisp (Emacs 30+ emits .elc and .eln caches)
+*.elc
+*.eln
+_elc/
+.emacs.d/
+# agent tooling session state (agent-shell transcripts etc.)
+.agent-shell/
+# eglot / lsp / flycheck / flymake artifacts
+.projectile
+TAGS
+ETAGS
+GPATH
+GRTAGS
+GTAGS
+flycheck_*.el
+flymake_*.el
+.dir-locals.el.bak
+# Emacs backup and lock files
+.#*
+\#*
+*.save
+*.save.*
+# transient / recentf style droppings if a user opens emacs -Q in-repo
+.emacs.desktop
+.emacs.desktop.lock
+.session
+# vdir / orgzly style sync droppings (paranoia, cheap)
+.org-id-locations
+_org_locations
+
+# =============================================================================
+# Other editors / OS noise
+# =============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# =============================================================================
+# Local build / scratch
+# NOTE: *.zip/*.7z are ignored repo-wide; binary companions must NOT live in
+# this repo (download them in CI). If that ever changes, negate explicitly.
+# =============================================================================
+build/
+dist/
+Packages/
+*.zip
+*.7z
+*.log
+
+# Deployment-specific gap analysis (private, never committed)
+GAP-ANALYSIS.md
+AGENTS.md

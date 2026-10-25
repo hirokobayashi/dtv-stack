@@ -1,0 +1,134 @@
+name: Build px4_drv for WinUSB
+
+# Manual trigger, plus automatic rebuild when versions.env or patches change
+# (Renovate merges bump versions.env on main, which fires this workflow).
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - versions.env
+      - patches/px4/**
+      - scripts/**
+      - .github/workflows/build_px4_drv.yml
+
+concurrency:
+  group: build-px4-drv
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # build.ps1 hardcodes both x86 and x64 platforms and builds/tests each.
+      # We keep it untouched (no fork, no in-flight patch) and ship only the
+      # 64-bit folders; the redundant 32-bit build costs a few minutes.
+      # Note: upstream also runs pkg/signing-tools/verify.ps1 and a WinSCard
+      # hash cross-check; those live in upstream's repo layout and are covered
+      # by its own CI. The PE-machine check below guards the 64-bit claim.
+      - name: Build px4_drv
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh PX4 px4_drv
+          bash scripts/apply-patches.sh px4 px4_drv
+          cd px4_drv/winusb/
+          ./build.ps1
+
+      - id: version
+        name: Set px4_drv version
+        working-directory: px4_drv
+        shell: pwsh
+        run: |
+          $version = git log --no-merges --date=iso --date=format:"%y%m%d" --pretty=format:"%ad" -1
+          echo "data=px4_drv_winusb-$version" >> $ENV:GITHUB_OUTPUT
+
+      # Ship only the _64bit BonDriver folders + Driver folder from dist/.
+      - name: Arrange artifacts (64-bit only)
+        shell: pwsh
+        run: |
+          mkdir ${{steps.version.outputs.data}}
+          cp -Path px4_drv/winusb/dist/*_64bit -Destination ${{steps.version.outputs.data}}/ -Recurse
+          cp -Path px4_drv/winusb/dist/Driver -Destination ${{steps.version.outputs.data}}/ -Recurse
+
+      # Sanity: every BonDriver folder must contain the core files, and every
+      # shipped PE binary must genuinely be 64-bit (reads the PE machine field,
+      # not the filename). BonDriver FileInfo objects are iterated by .FullName
+      # so Join-Path never receives a full path as a leaf.
+      - name: Validate artifacts
+        shell: pwsh
+        run: |
+          $artifact_root = Join-Path $PWD '${{steps.version.outputs.data}}'
+          $core_files = @('WinSCard.dll', 'DriverHost_PX4.exe', 'DriverHost_PX4.ini', 'it930x-firmware.bin')
+
+          $bon_driver_folders = @(Get-ChildItem $artifact_root -Directory | Where-Object Name -like '*_64bit' | ForEach-Object Name | Sort-Object)
+          if ($bon_driver_folders.Count -eq 0) {
+              throw "No *_64bit folders found under $artifact_root"
+          }
+          $others = @(Get-ChildItem $artifact_root -Directory | Where-Object { $_.Name -ne 'Driver' -and $_.Name -notlike '*_64bit' } | ForEach-Object Name)
+          if ($others.Count -ne 0) {
+              throw "Unexpected non-64bit folders present: $($others -join ', ')"
+          }
+
+          function Get-PEMachine([string] $path) {
+              $stream = [System.IO.File]::OpenRead($path)
+              try {
+                  $reader = [System.IO.BinaryReader]::new($stream)
+                  $stream.Position = 0x3c
+                  $pe_offset = $reader.ReadInt32()
+                  $stream.Position = $pe_offset + 4
+                  return $reader.ReadUInt16()
+              } finally {
+                  $stream.Dispose()
+              }
+          }
+
+          foreach ($folder_name in $bon_driver_folders) {
+              $folder = Join-Path $artifact_root $folder_name
+              foreach ($required_file in $core_files) {
+                  if (-not (Test-Path (Join-Path $folder $required_file) -PathType Leaf)) {
+                      throw "Required file is missing. folder: $folder_name, file: $required_file"
+                  }
+              }
+              $bon_drivers = @(Get-ChildItem $folder -File -Filter 'BonDriver_*.dll')
+              if ($bon_drivers.Count -eq 0) {
+                  throw "BonDriver is missing. folder: $folder_name"
+              }
+              foreach ($bin_name in @('WinSCard.dll', 'DriverHost_PX4.exe')) {
+                  if ((Get-PEMachine (Join-Path $folder $bin_name)) -ne 0x8664) {
+                      throw "Binary is not x64. folder: $folder_name, file: $bin_name"
+                  }
+              }
+              foreach ($bon_driver in $bon_drivers) {
+                  if ((Get-PEMachine $bon_driver.FullName) -ne 0x8664) {
+                      throw "BonDriver is not x64. folder: $folder_name, file: $($bon_driver.Name)"
+                  }
+              }
+          }
+
+      - name: Compress artifact
+        shell: pwsh
+        run: |
+          7z a -tzip -mx=9 ${{steps.version.outputs.data}}.zip ${{steps.version.outputs.data}}/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{steps.version.outputs.data}}.zip
+          path: ${{steps.version.outputs.data}}.zip
+
+      - name: Upload to Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{steps.version.outputs.data}}" --title "${{steps.version.outputs.data}}" --notes "px4_drv for WinUSB, 64-bit BonDriver folders + Driver installer. Sources pinned at the SHAs in versions.env (see repository)." "${{steps.version.outputs.data}}.zip" || gh release upload "${{steps.version.outputs.data}}" "${{steps.version.outputs.data}}.zip" --clobber

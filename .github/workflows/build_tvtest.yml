@@ -1,0 +1,238 @@
+name: Build TVTest
+
+# Manual trigger, plus automatic rebuild when versions.env or patches change
+# (Renovate merges bump versions.env on main, which fires this workflow).
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - versions.env
+      - patches/tvtest/**
+      - scripts/**
+      - .github/workflows/build_tvtest.yml
+
+concurrency:
+  group: build-tvtest
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # Run steps use pwsh (the windows default) with upstream-faithful
+      # PowerShell syntax; bash is only a subprocess for clone.sh /
+      # apply-patches.sh / package.sh.
+      #
+      # x64-only. LibISDB first, then TVTest, then the sample plugins.
+      - name: Build TVTest (x64)
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh TVTEST TVTest --recursive
+          bash scripts/apply-patches.sh tvtest TVTest
+
+          cd TVTest/src/LibISDB/Projects/
+          msbuild LibISDB.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142
+
+          cd ../../
+          msbuild TVTest.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142
+
+          cd ../sdk/Samples/
+          msbuild Samples.sln /t:Build /p:Configuration=Release_static /p:Platform=x64 /p:PlatformToolset=v142
+
+      - id: version
+        name: Set TVTest version
+        working-directory: TVTest
+        shell: pwsh
+        run: |
+          $version = git log --no-merges --date=iso --date=format:"%y%m%d" --pretty=format:"%ad" -1
+          echo "data=TVTest-0.10.0-$version" >> $ENV:GITHUB_OUTPUT
+
+      - name: Package TVTest (x64)
+        shell: pwsh
+        run: |
+          mkdir Packages
+          cd TVTest/
+          bash package.sh -a x64 -c static -l all -t Release -o ../Packages/
+          cd ../
+
+          mkdir ${{steps.version.outputs.data}}
+          cp -Path Packages/x64/release/ -Destination ${{steps.version.outputs.data}}/TVTest_64bit/ -Recurse
+          cp -Path assets/TVTest/* -Destination ${{steps.version.outputs.data}}/TVTest_64bit/ -Recurse -Force
+
+      - name: Build BonDriver_UDP / BonDriver_TCP (x64)
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh BONUDP BonDriver_UDP-TCP
+          cd BonDriver_UDP-TCP/
+          msbuild BonDriver_ALL.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142
+          cp -Path x64/Release/BonDriver_UDP.dll -Destination ../${{steps.version.outputs.data}}/TVTest_64bit/
+          cp -Path x64/Release/BonDriver_TCP.dll -Destination ../${{steps.version.outputs.data}}/TVTest_64bit/
+          cp -Path BonDriver_UDP.txt -Destination ../${{steps.version.outputs.data}}/TVTest_64bit/
+
+      # jkcnsl: .NET single-file self-contained publish (x64 only).
+      # No PublishTrimmed: the solution includes a WPF subproject
+      # (JkcnslLoginWindow) and the .NET 10 SDK hard-errors on WPF+trimming
+      # (NETSDK1168); trimming only saved size on this small utility.
+      - name: Build jkcnsl (x64)
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh JKCNSL jkcnsl
+          cd jkcnsl/
+          dotnet publish -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true
+          cp -Path bin/Release/net10.0/win-x64/publish/jkcnsl.exe -Destination ../${{steps.version.outputs.data}}/TVTest_64bit/
+
+      - name: Download jq.exe / sqlite3.exe (x64)
+        shell: pwsh
+        run: |
+          curl -L -o ${{steps.version.outputs.data}}/TVTest_64bit/jq.exe https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-windows-amd64.exe
+          curl -L -o sqlite64.zip https://www.sqlite.org/2026/sqlite-tools-win-x64-3530400.zip
+          7z x -y sqlite64.zip
+          cp -Path sqlite3.exe -Destination ${{steps.version.outputs.data}}/TVTest_64bit/
+
+      - name: Build TvCas (B25.tvcas / B1.tvcas, x64)
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh TVCAS TvCas
+          cd TvCas/
+          msbuild TvCas.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142
+          cp -Path x64/Release/B1.tvcas -Destination ../${{steps.version.outputs.data}}/TVTest_64bit/
+          cp -Path x64/Release/B25.tvcas -Destination ../${{steps.version.outputs.data}}/TVTest_64bit/
+
+      - name: Build TVTestVideoDecoder (x64)
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh TVTVD TVTestVideoDecoder
+          cd TVTestVideoDecoder/src/
+          msbuild TVTestVideoDecoder.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142
+          cp -Path x64/Release/TVTestVideoDecoder.ax -Destination ../../${{steps.version.outputs.data}}/TVTest_64bit/
+          cd ../
+          cp -Path doc/TVTestVideoDecoder.txt -Destination ../${{steps.version.outputs.data}}/TVTest_64bit/
+
+      - name: Build CasProcessor (x64)
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh CASPROC CasProcessor
+          cd CasProcessor/
+          msbuild CasProcessor.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142
+          cp -Path x64/Release/CasProcessor.tvtp -Destination ../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/
+
+      - name: Build NicoJK (x64)
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh NICOJK NicoJK
+          cd NicoJK/
+          msbuild NicoJK.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142
+          cp -Path x64/Release/NicoJK.tvtp -Destination ../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/
+          cp -Path Readme.txt -Destination ../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/NicoJK_Readme.txt
+          mkdir ../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/NicoJK/
+          cp -Path x64/Release/jkimlog.exe -Destination ../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/NicoJK/
+          cp -Path x64/Release/jkrdlog.exe -Destination ../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/NicoJK/
+
+      - name: Build TVCaptionMod2 (x64)
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh TVCAP TVCaptionMod2
+          cd TVCaptionMod2/Caption_src/
+          msbuild Caption.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142
+          cd ../src/
+          msbuild TVCaption2.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142
+          cp -Path x64/Release/TVCaptionMod2.tvtp -Destination ../../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/
+          cd ../
+          cp -Path TVCaptionMod2_Readme.txt -Destination ../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/
+
+      - id: tvt_wv2_version
+        name: Set TVTDataBroadcastingWV2 version
+        shell: pwsh
+        run: |
+          $t=[System.DateTimeOffset]::Now.ToOffset([System.TimeSpan]::FromHours(9)).ToString("yyyy-MM-dd-HH-mm-ss")
+          $sha=$env:GITHUB_SHA.Substring(0, 12)
+          echo "VERSION=$t-$sha" >> $ENV:GITHUB_OUTPUT
+
+      # Data broadcasting plugin: C++ build (nuget restore) + Node 22 web-bml
+      # browser bundle. Skip these steps if you do not need data broadcasting.
+      - name: Build TVTDataBroadcastingWV2 (x64)
+        env:
+          VERSION: ${{ steps.tvt_wv2_version.outputs.VERSION }}
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh TVTWV2 TVTDataBroadcastingWV2 --recursive
+          cd TVTDataBroadcastingWV2/
+          nuget restore ./
+          msbuild TVTDataBroadcastingWV2.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142 "/p:TVTDataBroadcastingWV2Version=L`"$env:VERSION`""
+          cp -Path x64/Release/TVTDataBroadcastingWV2.tvtp -Destination ../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/
+          cp -Path README.md -Destination ../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/TVTDataBroadcastingWV2_Readme.txt
+
+      - name: Setup Node.js 22 (TVTDataBroadcastingWV2 browser)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache-dependency-path: TVTDataBroadcastingWV2/browser/package-lock.json
+
+      - name: Build web-bml
+        shell: pwsh
+        run: |
+          cd TVTDataBroadcastingWV2/browser/
+          npm ci
+          npm run build
+          mkdir ../../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/TVTDataBroadcastingWV2/resources/dist/
+          cp -Path dist/TVTDataBroadcastingWV2.js -Destination ../../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/TVTDataBroadcastingWV2/resources/dist/
+          cp -Path node_modules/web-bml-fonts/*.woff2 -Destination ../../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/TVTDataBroadcastingWV2/resources/dist/
+          cp -Path node_modules/web-bml-fonts/LICENSE.txt -Destination ../../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/TVTDataBroadcastingWV2/resources/dist/fonts-LICENSE.txt
+          cp -Path dist/TVTDataBroadcastingWV2.js.LICENSE.txt -Destination ../../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/TVTDataBroadcastingWV2/resources/dist/
+          cp -Path TVTDataBroadcastingWV2.html -Destination ../../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/TVTDataBroadcastingWV2/resources/
+
+      # TvtPlay + its DirectShow audio filter chain (work-plus branch, x64)
+      - name: Build TvtPlay (x64)
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh TVTPLAY TvtPlay
+          cd TvtPlay/BonDriver_Pipe_src/
+          msbuild BonDriver_Pipe.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142
+          cp -Path x64/Release/BonDriver_Pipe.dll -Destination ../../${{steps.version.outputs.data}}/TVTest_64bit/
+
+          cd ../TvtAudioStretchFilter_src/baseclasses/
+          msbuild BaseClasses_VC14.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142
+
+          cd ../soundtouch/source/SoundTouch/
+          msbuild SoundTouch.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142
+
+          cd ../../../
+          msbuild TvtAudioStretchFilter.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142
+          cp -Path x64/Release/TvtAudioStretchFilter.ax -Destination ../../${{steps.version.outputs.data}}/TVTest_64bit/
+
+          cd ../src/
+          msbuild TvtPlay.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142
+          cp -Path x64/Release/TvtPlay.tvtp -Destination ../../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/
+          cp -Path Buttons24.bmp -Destination ../../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/TvtPlay_Buttons24.bmp
+          cp -Path Buttons32.bmp -Destination ../../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/TvtPlay_Buttons32.bmp
+          cd ../
+          cp -Path TvtPlay_Readme.txt -Destination ../${{steps.version.outputs.data}}/TVTest_64bit/Plugins/
+
+      - name: Compress artifact
+        shell: pwsh
+        run: |
+          7z a -tzip -mx=9 ${{steps.version.outputs.data}}.zip ${{steps.version.outputs.data}}/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{steps.version.outputs.data}}.zip
+          path: ${{steps.version.outputs.data}}.zip
+
+      - name: Upload to Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{steps.version.outputs.data}}" --title "${{steps.version.outputs.data}}" --notes "TVTest 0.10.0 x64 build. Sources pinned at the SHAs in versions.env (see repository)." "${{steps.version.outputs.data}}.zip" || gh release upload "${{steps.version.outputs.data}}" "${{steps.version.outputs.data}}.zip" --clobber

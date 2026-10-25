@@ -1,0 +1,79 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^versions\\.env$/"
+      ],
+      "matchStrings": [
+        "(?:^|\\r?\\n)# renovate: depName=(?<depName>\\S+) branch=(?<currentValue>\\S+)\\s*\\w+_REF=(?<currentDigest>[0-9a-f]{40})"
+      ],
+      "datasourceTemplate": "git-refs",
+      "packageNameTemplate": "https://github.com/{{{depName}}}.git"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Main apps: one PR each so a build is attributable to a single source bump",
+      "matchDepNames": [
+        "tsukumijima/EDCB"
+      ],
+      "groupName": "edcb",
+      "matchUpdateTypes": [
+        "digest"
+      ]
+    },
+    {
+      "matchDepNames": [
+        "tsukumijima/TVTest"
+      ],
+      "groupName": "tvtest",
+      "matchUpdateTypes": [
+        "digest"
+      ]
+    },
+    {
+      "matchDepNames": [
+        "tsukumijima/px4_drv"
+      ],
+      "groupName": "px4-drv",
+      "matchUpdateTypes": [
+        "digest"
+      ]
+    },
+    {
+      "description": "Companions: one grouped PR. git-refs has no release timestamps, so minimumReleaseAge cannot be used here; review each PR's compare link.",
+      "matchDepNames": [
+        "tsukumijima/libaribb25",
+        "xtne6f/lua",
+        "xtne6f/lua-zlib",
+        "tsukumijima/Write_Multi",
+        "tsukumijima/EDCB_Material_WebUI",
+        "xtne6f/psisiarc",
+        "xtne6f/psisimux",
+        "xtne6f/tsmemseg",
+        "xtne6f/tsreadex",
+        "tsukumijima/BonDriver_UDP-TCP",
+        "xtne6f/jkcnsl",
+        "tsukumijima/TvCas",
+        "tsukumijima/TVTestVideoDecoder",
+        "tsukumijima/CasProcessor",
+        "xtne6f/NicoJK",
+        "tsukumijima/TVCaptionMod2",
+        "tsukumijima/TVTDataBroadcastingWV2",
+        "xtne6f/TvtPlay"
+      ],
+      "groupName": "companion components",
+      "matchUpdateTypes": [
+        "digest"
+      ]
+    }
+  ]
+}

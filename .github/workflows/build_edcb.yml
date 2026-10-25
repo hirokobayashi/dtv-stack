@@ -1,0 +1,177 @@
+name: Build EDCB
+
+# Manual trigger, plus automatic rebuild when versions.env or patches change
+# (Renovate merges bump versions.env on main, which fires this workflow).
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - versions.env
+      - patches/edcb/**
+      - scripts/**
+      - .github/workflows/build_edcb.yml
+
+# One build at a time; queue subsequent pushes instead of cancelling mid-build.
+concurrency:
+  group: build-edcb
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # Run steps use pwsh (the windows default) because the packaging commands
+      # are PowerShell syntax, kept upstream-faithful. bash is only invoked as
+      # a subprocess for scripts/clone.sh, scripts/apply-patches.sh and the
+      # fork's package.sh.
+      #
+      # x64-only. Windows SDK pinned to 10.0.22621.0: newer UCRT static links
+      # trigger AV false positives on psisiarc/tsreadex and friends (upstream
+      # lesson from DTV-Builds). asyncbuf rebuilt with v143 for the same reason.
+      - name: Build EDCB (x64)
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh EDCB EDCB
+          bash scripts/apply-patches.sh edcb EDCB
+
+          cd EDCB/Document/
+          msbuild EDCB_ALL.VS2015.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142 /p:WindowsTargetPlatformVersion=10.0.22621.0
+          msbuild ../Tools/asyncbuf.vcxproj /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0.22621.0 /p:SolutionDir=$PWD\
+
+      - id: version
+        name: Set EDCB version
+        working-directory: EDCB
+        shell: pwsh
+        run: |
+          $version = ((Get-Content -Path "Common/CommonResource.h") -match '#define EDCB_VERSION_TAG "(.*)"')[0] -replace '#define EDCB_VERSION_TAG "', '' -replace '"', '' -replace 'tkntrec-', ''
+          $version_date = [DateTime]::ParseExact($version, "yyMMdd", $null).ToString("yyyy/MM/dd")
+          echo "data=EDCB-$version" >> $ENV:GITHUB_OUTPUT
+          echo "version_date=$version_date" >> $ENV:GITHUB_OUTPUT
+
+      - name: Package EDCB (x64)
+        shell: pwsh
+        run: |
+          mkdir Packages
+          cd EDCB/
+          bash package.sh -a x64 -t Release -o ../Packages/
+          cd ../
+
+          mkdir ${{steps.version.outputs.data}}
+          cp -Path Packages/x64/release/ -Destination ${{steps.version.outputs.data}}/EDCB_64bit/ -Recurse
+          cp -Path assets/EDCB/* -Destination ${{steps.version.outputs.data}}/EDCB_64bit/ -Recurse -Force
+          mkdir ${{steps.version.outputs.data}}/EDCB_64bit/BonDriver/ -Force
+          mv -Path ${{steps.version.outputs.data}}/EDCB_64bit/LICENSE-Civetweb.md -Destination ${{steps.version.outputs.data}}/EDCB_64bit/License_CivetWeb.md
+
+      - name: Build libaribb25 (B25Decoder.dll / B1Decoder.dll, x64)
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh LIBARIBB25 libaribb25
+          cd libaribb25/
+          msbuild arib_std_b25.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142 /p:WindowsTargetPlatformVersion=10.0.22621.0
+          cp -Path x64/Release/libaribb1.dll -Destination ../${{steps.version.outputs.data}}/EDCB_64bit/B1Decoder.dll
+          cp -Path x64/Release/libaribb25.dll -Destination ../${{steps.version.outputs.data}}/EDCB_64bit/B25Decoder.dll
+
+      - name: Download OpenSSL 3.0 (x64)
+        shell: pwsh
+        run: |
+          curl -LO https://download.firedaemon.com/FireDaemon-OpenSSL/openssl-3.0.22.zip
+          7z x -y openssl-3.0.22.zip
+          cp -Path openssl-3.0/x64/bin/libcrypto-3-x64.dll -Destination ${{steps.version.outputs.data}}/EDCB_64bit/
+          cp -Path openssl-3.0/x64/bin/libssl-3-x64.dll -Destination ${{steps.version.outputs.data}}/EDCB_64bit/
+          cp -Path openssl-3.0/x64/bin/openssl.exe -Destination ${{steps.version.outputs.data}}/EDCB_64bit/
+
+      - name: Build Lua 5.2 + lua-zlib (x64)
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh LUA lua
+          cd lua/
+          msbuild lua52.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142 /p:WindowsTargetPlatformVersion=10.0.22621.0
+          cp -Path x64/Release/lua52.dll -Destination ../${{steps.version.outputs.data}}/EDCB_64bit/
+
+          cd ../
+          bash scripts/clone.sh LUAZLIB lua-zlib
+          cd lua-zlib/
+          msbuild zlib52.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142 /p:WindowsTargetPlatformVersion=10.0.22621.0
+          cp -Path x64/Release/zlib52.dll -Destination ../${{steps.version.outputs.data}}/EDCB_64bit/zlib52.dll
+
+      - name: Build Write_Multi (x64)
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh WRITEMULTI Write_Multi
+          cd Write_Multi/
+          msbuild Write_Multi.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142 /p:WindowsTargetPlatformVersion=10.0.22621.0
+          cp -Path x64/Release/Write_Multi.dll -Destination ../${{steps.version.outputs.data}}/EDCB_64bit/EdcbPlugIn/
+
+      - name: Download EDCB Material WebUI
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh EMWUI EDCB_Material_WebUI
+          cp -Path EDCB_Material_WebUI/HttpPublic/* -Destination ${{steps.version.outputs.data}}/EDCB_64bit/HttpPublic/ -Recurse -Force
+          cp -Path EDCB_Material_WebUI/Setting/* -Destination ${{steps.version.outputs.data}}/EDCB_64bit/Setting/ -Recurse -Force
+          cp -Path EDCB_Material_WebUI/README.md -Destination ${{steps.version.outputs.data}}/EDCB_64bit/Readme_EMWUI.md
+
+      # Zeranoe is gone; upstream pulls the shared 4.3.1 builds via the Wayback
+      # Machine. 64-bit only.
+      - name: Download FFmpeg 4.3.1 (x64)
+        shell: pwsh
+        run: |
+          curl -LO https://web.archive.org/web/2if_/https://ffmpeg.zeranoe.com/builds/win64/shared/ffmpeg-4.3.1-win64-shared.zip
+          7z x -y ffmpeg-4.3.1-win64-shared.zip
+          cp -Path ffmpeg-4.3.1-win64-shared/bin/* -Destination ${{steps.version.outputs.data}}/EDCB_64bit/Tools/
+          rm ${{steps.version.outputs.data}}/EDCB_64bit/Tools/ffplay.exe
+
+      - name: Build xtne6f tools (psisiarc / psisimux / tsmemseg / tsreadex, x64)
+        shell: pwsh
+        run: |
+          bash scripts/clone.sh PSISIARC psisiarc
+          cd psisiarc/
+          msbuild psisiarc.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142 /p:WindowsTargetPlatformVersion=10.0.22621.0
+          cp -Path x64/Release/psisiarc.exe -Destination ../${{steps.version.outputs.data}}/EDCB_64bit/Tools/
+          cd ../
+
+          bash scripts/clone.sh PSISIMUX psisimux
+          cd psisimux/
+          msbuild psisimux.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142 /p:WindowsTargetPlatformVersion=10.0.22621.0
+          cp -Path x64/Release/psisimux.exe -Destination ../${{steps.version.outputs.data}}/EDCB_64bit/Tools/
+          cd ../
+
+          bash scripts/clone.sh TSMEMSEG tsmemseg
+          cd tsmemseg/
+          msbuild tsmemseg.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142 /p:WindowsTargetPlatformVersion=10.0.22621.0
+          cp -Path x64/Release/tsmemseg.exe -Destination ../${{steps.version.outputs.data}}/EDCB_64bit/Tools/
+          cd ../
+
+          bash scripts/clone.sh TSREADEX tsreadex
+          cd tsreadex/
+          msbuild tsreadex.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142 /p:WindowsTargetPlatformVersion=10.0.22621.0
+          cp -Path x64/Release/tsreadex.exe -Destination ../${{steps.version.outputs.data}}/EDCB_64bit/Tools/
+          cp -Path ../${{steps.version.outputs.data}}/EDCB_64bit/Tools/tsreadex.exe -Destination ../${{steps.version.outputs.data}}/EDCB_64bit/Tools/edcbnosuspend.exe
+
+      - name: Compress artifact
+        shell: pwsh
+        run: |
+          7z a -tzip -mx=9 ${{steps.version.outputs.data}}.zip ${{steps.version.outputs.data}}/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{steps.version.outputs.data}}.zip
+          path: ${{steps.version.outputs.data}}.zip
+
+      - name: Upload to Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{steps.version.outputs.data}}" --title "${{steps.version.outputs.data}}" --notes "EDCB (tkntrec lineage) x64 build. Sources pinned at the SHAs in versions.env (see repository)." "${{steps.version.outputs.data}}.zip" || gh release upload "${{steps.version.outputs.data}}" "${{steps.version.outputs.data}}.zip" --clobber
